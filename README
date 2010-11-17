@@ -1,0 +1,15 @@
+CoffeeSync (csync.coffee) is a CoffeeScript program that uses zenity
+to provide a GTK+ (GNOME) GUI for simple rsync backups.
+
+The rsync options are currently hard-coded in the source.  Those options
+specify that the source directory will be copied to the destination using
+rsync's update algorithm to transfer only new files and update files that
+exist on the destination to match the source.  Files that exist on the
+destination 
+
+Requirements:
+(You can just run the install script in this repository to install these.)
+CoffeeScript 0.94 or greater. (http://jashkenas.github.com/coffee-script/)  
+Node 0.30 or greater. (http://nodejs.org/)
+zenity 2.32.0 or greater.  (http://live.gnome.org/Zenity) Version probably not important.
+npm (http://npmjs.org)
