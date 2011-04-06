@@ -13,7 +13,7 @@ Syntax: csync source destination [--delete]
 
 Requirements: 
 
-CoffeeScript 0.94 orgreater. (http://jashkenas.github.com/coffee-script/) Node 0.30 or
-greater. (http://nodejs.org/) zenity 2.32.0 or greater.
-(http://live.gnome.org/Zenity) Version probably not important.  npm
-(http://npmjs.org)
+CoffeeScript 0.94 or greater. (http://jashkenas.github.com/coffee-script/)
+Node 0.30 or greater. (http://nodejs.org/)
+zenity 2.32.0 or greater. (http://live.gnome.org/Zenity) Version probably not important.
+
