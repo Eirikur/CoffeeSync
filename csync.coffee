@@ -2,198 +2,165 @@
 # CoffeeSync by Eiríkur Hallgrímsson (C) 2010, 2011
 # released under the terms of the GNU General Public License V2
 
-# FIXME: stderr error dialog isn't a global var.  Doesn't save state.
+# FIXME: --delete not yet supported
+# --verify might do something useful.
+# --debug might....
 
 # We use these NodeJS standard library routines.  Note that we are assuming Node 0.30 or later.
 {spawn, exec}  = require 'child_process'
 {print, puts, debug, error, inspect, p, log, pump, inherits} = require 'util'
 fs = require 'fs'
+events = require 'events'
 
-# Returns a child process object that is running cmd.
-# We can write to its stdin and read from stdout and stderr
-do_cmd = (cmd) ->
-    return exec cmd
-
-# Create a timestamp file and copy it to the destination.  FIXME: this isn't used yet.
-timestamp = (timestamp_file_name, source, dest) ->
-    source += '/' if not (source[source.length-1] == '/')
-    do_cmd "touch #{source}#{timestamp_file_name}"
-    do_cmd "scp #{source}#{timestamp_file_name} #{destination}"
-
-# Performs an rsync of source to dest.  If dryrun is true then just scan and report files needing to be updated.
 rsync = (source, dest, dryrun, delete_files ) ->
     options =  "--perms --executability --update --xattrs --owner --group --cvs-exclude --times"
     options += " --archive --human-readable --partial --recursive --timeout=60 --one-file-system"
     options += " --out-format='%n'"
     options += " --delete-during --force" if delete_files # Okay to delete non-empty dirs on destination.
     # Exclude iso images which are not worth backing up and information.org which is confidential
-    # *.vmdk is a virtual disk image file for VirtualBox.
-    excludes = " --exclude='*.iso'  --exclude='information.org' --exclude='*.vmdk' --exclude='Trash'"
+    # *.vmdk is a virtual disk image file for VMware, *.vdi for VirtualBox
+    excludes = " --exclude='*.iso'  --exclude='information.org' --exclude='*.vmdk' --exclude='*.vdi' --exclude='Trash'"
     dryrun = if dryrun then "--dry-run" else "--stats" # Either dry-run or get stats
     # New version of nodeJS has some problem if we 'exec' rsync instead of just running it.
     #    cmd = "exec rsync #{source} #{dryrun} #{dest} #{options} #{excludes}"
-    cmd = "rsync #{source} #{dryrun} #{dest} #{options} #{excludes}"
-    return do_cmd cmd
-
-# Displays a Zenity progress bar that throbs to show activity.
-# We put up this window while rsync is scanning to find what files
-# need to be updated. Returns the child process object.
-scan = (source, destination) ->
-    title  =  "CoffeeSync is scanning #{source} and #{destination}"
-    text = "Initial read of #{source} and #{destination}"
-    # text = padding + text + padding # The padding makes the progress bar longer/more readable.
-    cmd = "zenity --progress --pulsate --auto-close --auto-kill --title='#{title}' --text='#{text}'"
-    return do_cmd cmd
-
-# Displays a Zenity progress bar window and returns a child process object.
-# Shows the count of files that need updating.
-progress = (source, destination, count) ->
-    title  =  "CoffeeSync is updating #{count} files."
-    text = "Performing backup of #{source} to #{destination}"
-    text = padding + text + padding # The padding makes the progress bar longer/more readable.
-    cmd = "zenity --progress --title='#{title}' --text='#{text}' --auto-close --auto-kill --percentage=1"
-    return do_cmd cmd
-
-# Displays a Zenity informational message window with msg.
-info = (title, msg) ->
-    return do_cmd "zenity --info --title='#{title}' --text='#{msg}'\n"
+    cmd = "rsync #{source} #{dest} #{dryrun} #{options} #{excludes}"
+    return exec cmd
 
 # Displays a Zenity text message window, which we use to display errors.
-errors = (title) ->
-    return do_cmd "zenity --text-info --title='#{title}'\n"
-
-# Displays a Zenity warning window because we are about to delete files.
-# This is displayed over a gedit window which contains the list of files.
-process_deletes_and_continue = (list) ->
-    filespec = "/tmp/csync-files-to-delete.txt"
-    list_string = ""
-    list_string += "#{item}\n" for item in list
-    fs.writeFileSync filespec, list_string, encoding = 'utf8'
-    GEDIT = do_cmd "exec gedit #{filespec}"  # Now we wait for it to appear on the screen.
-    setTimeout(ask_about_deletes, 2000, GEDIT) # After two seconds call ask_about_deletes
-
-ask_about_deletes = (GEDIT) ->
-    title = "CoffeeSync: Files exist on destination that have been removed from source."
-    text = "Remove these files from destination?"
-    dialog = do_cmd "zenity --question --title='#{title}' --text='#{text}'  --width=600"
-    dialog.on 'exit', (status) ->
-        do_deletes = not status
-        GEDIT.kill 'SIGKILL'
-        perform_actions(SCAN_RESULTS, do_deletes)
-
-# The start of a complete logging system.  It's just for debugging issues with files
-# that can't be copied right now.
-log = (msg) ->
-    log_array.push msg
-    # puts "Log: #{msg}"
-
-# Detect file deletion messages and put them into DELETE_ARRAY
-is_delete = (line) ->
-    d = 'deleting '
-    if (line.substring(0, d.length) == d)
-        line = line.substring(d.length, line.length) # remove prefix
-        DELETE_ARRAY.push "#{line}"
-        return true
-    else
-       return false # return status is no longer used.
+class ErrorDialog extends events.EventEmitter
+    constructor: (@title) ->
+        @dialog = exec "zenity --text-info --title='#{@title}'\n"
+        @dialog.on 'exit', (status) -> @emit 'dismissed'
+    write: (buffer) ->
+        @dialog.stdin.write buffer
 
 
-# Given the scan results, perform the required actions.
-perform_actions = (SCAN_RESULTS, do_deletes) ->
-    counter = 0
-    percent_counter = 0
-    lines = SCAN_RESULTS.length # This is the list of files that will be updated.
-    percent = lines*.01         # This is the number of lines in one percent of the list.
-    progress_bar = progress source, destination, SCAN_RESULTS.length
-    progress_bar.on 'exit', (status) ->
-        puts "User canceled from progress dialog. Exit status: #{status}"
-        rsync_process.stdin.close
-        process.exit(status) # Exit this program, propagating the status code.
-    rsync_process = rsync(source, destination, false, do_deletes) # src, dst, dryrun, delete flag
-    # Handler for messages sent from rsync to stderr.
-    rsync_process.stderr.on 'data', (buffer) ->
-        print "rsync_process error: #{buffer}\n"
-        log buffer
-        e = errors("CoffeeSync: Error from rsync during copy") unless e? # Create window if needed.
-        msg = "#{buffer}\n"
-        e.stdin.write msg
-        log msg
-    # Handler for progress information on stdout
-    rsync_process.stdout.on 'data', (buffer) ->
-        glob = buffer.toString().split("\n")
-        for line in glob
-            if line.length > 1
-                results.push line
-                log line
-                progress_bar.stdin.write "\##{line}\n"
-                counter += 1
-                if counter > percent
-                    counter = 0
-                    percent_counter += 1
-                    progress_bar.stdin.write "#{percent_counter}\n"
+class Syncer extends events.EventEmitter
+    # src, dest, dry-run, okay-to-delete, file_list
+    constructor: (@source, @destination, @dryrun, @delete, @file_list) ->
+        @deleting = 'deleting '
+        @results = []
+        @progress_dialog = new SyncProgress(@source, @destination, @dryrun, @delete, @file_list.length)
+        @progress_dialog.on 'cancelled', => @cancel() # When canceled from the dialog, call our cancel method.
+        @progress_dialog.on 'exit', (status, signal) => @progress_dialog_exited(status, signal) # When the dialog exits...
+        @rsync = rsync(source, destination, @dryrun, @delete)
+        @rsync.stdout.on 'data', (buffer) => @process buffer # For each chunk of output from rsync
+        @rsync.stderr.on 'data', (buffer) => @error buffer  # For each error message
+        @rsync.on 'exit', (status, signal) => @done status, signal
+    process: (buffer) ->
+        for line in buffer.toString().split("\n")
+            line = line.trim()
+            if line.length > 0
+                @capture_deletes line
+                @results.push line
+                @progress_dialog.write "\##{line}"
+    error: (msg) ->
+        puts "rsync error:", msg
+        @errors = [] unless @errors? # Create holder variable unless it already exists
+        @error_dialog = new ErrorDialog "CoffeeSync: Errors during Copy" unless @error_dialog? # Create window if needed.        @errors.push msg
+        @error_dialog.on 'dismissed', -> @error_dialog_dismissed()
+        @error_dialog.write msg
+    cancel: () ->
+        @rsync.kill('SIGKILL')
+        process.exit(125) # Linux ECANCELED
+    capture_deletes: (line) ->
+        @deletes = [] unless @deletes? # Create this instance variable unless it exists.
+        @deletes.push line if (line.substring(0, @deleting.length) == @deleting) # save it if it begins thusly
+    progress_dialog_exited: (status, signal) ->
+        @exit()
+    error_dialog_dismissed:  =>
+        @emit 'done', @results
+    done: (status, signal) => # If there are errors, 'done' is emitted by dismissing the error_dialog.
+        @progress_dialog.kill() if @progress_dialog? # Close the zenity dialog.
+    exit: =>
+        @emit 'done', @results
 
-    rsync_process.on 'exit', (status) ->
-        end_time = new Date
-        elapsed_time = start_time - end_time
-        progress_bar.stdin.write "100\n" # Let Zenity dialog know we are done.
-        progress_bar.stdin.close # Close the stream.
-        statistics = log_array[log_array.length-13..log_array.length-1] # The statistics msg from rsync.
-        statistics = statistics.join '\n'
-        exit_status = if status then "Exit status: #{status}" else ""
-        info "'CoffeeSync of #{source} to #{destination} Complete.'",  statistics
-        process.exit status # Report the actual rsync exit status to the shell.
+
+
+class SyncProgress extends events.EventEmitter
+    # Displays a Zenity progress bar that throbs to show activity.
+    # We put up this window while rsync is scanning to find what
+    # needs to be updated. next_function is called when the dialog is dismissed.
+    constructor: (@source, @destination, @dryrun, @delete, @count = 0) ->
+        @counter = 0
+        @percent = .01 * count
+        @percent_counter = 0
+        @shutting_down = false
+        if @dryrun
+            title  =  "CoffeeSync is scanning #{@source} and #{@destination} ..."
+            text   =  "Initial read of #{@source} and #{@destination}"
+        else
+            title  =  "CoffeeSync is syncing #{@count} files from #{@source} to #{@destination}"
+            text   =  "Preparing...."
+        cmd = "zenity --width=650 --progress --auto-close --auto-kill --title='#{title}' --text='#{text}'"
+        cmd += " --pulsate" if @dryrun
+        @dialog = exec cmd
+        @dialog.on 'exit', (status, signal) =>
+            # puts "zenity exit during scan. status: #{status} signal: #{signal}"
+            @emit 'cancelled' if signal is 'SIGHUP'
+            @emit 'done' if signal is 'SIGTERM' or signal is 'SIGKILL' # Killed by the rsync process so that we don't have to wait.
+            if status is 0 or status is null then @emit 'exit', 0, signal else @zenity_error status, signal
+    write: (data) ->
+        if not @shutting_down
+            if not @dryrun # This is a real copy operation
+                @dialog.stdin.write "#{data}\n" if @dialog.stdin.writable
+                @counter += 1
+                if @counter = @percent # We have processed one percent worth of files.
+                    @counter = 0
+                    @percent_counter += 1 # This is our cumulative percentage done.
+                    @dialog.stdin.write "#{@percent_counter}\n" if @dialog.stdin.writable
+            else #Throttle output during scan by showing only directories.
+                @dialog.stdin.write "#{data}\n" if data[data.length - 1 ] is '/' if @dialog.stdin.writable
+    kill: ->
+        @shutting_down = true
+        @dialog.stdin.write "100\n" if @dialog.stdin.writable # Close the zenity dialog using the --auto-close at 100%
+    zenity_error: (status, signal) -> puts "zenity dialog exited with error status: #{status} and signal: #{signal}"
+
+
+
+# Displays a Zenity informational message window with msg.
+class InformationDialog
+    constructor: (@title, @msg) ->
+        @dialog = "zenity --info --title='#{title}' --text='#{msg}'\n"
+
 
 
 #################### Main Program starts here. ####################
 
-start_time = new Date
-SCAN_RESULTS = [] # The list of files that need to be updated.
-results = []      # The list of files that have been updated so far.
-# Dialog padding.   Tweak to taste.
-padding = "                                        "
-log_array = []
-DELETE_ARRAY = []
-GEDIT = ""
 # No clever command line parsing, sorry. Options must come after the source and destination.
 source      = process.argv[2] # This is the directory that will be synced.
 destination = process.argv[3] # This is the destination of the sync.
 
-# Do this on successful exit.
-#timestamp('.TIMESTAMP', source, destination) # Create a timestamp on source and copy to destination.
-
-# TODO FIXME not used yet
 DELETE = if "--delete" in process.argv then true else false
+HELP = if "--help" in process.argv then true else false
+# TODO FIXME not used yet
 VERIFY = if (("-v" in process.argv) or ("--verify" in process.argv)) then true else false
 
-# Create the zenity progress bar window for the initial 'scan' rsync --dry-run
-scanning = scan source, destination
-scanning.stdin.write "1\n" # Start progress bar at one percent
 
-# Create the child process that performs the initial scan. Dryrun = true, delete = true.
-scanner = rsync(source, destination, true, true)
-scanner.stdout.on 'data', (buffer) ->    # When the child process produces a line of output, do the following.
-    glob = buffer.toString().split("\n") # We might get multiple lines at once.
-    for line in glob
-        if not is_delete line # If this line performs a delete, we don't display it.
-            if line.length > 1 # This is a file name.  rsync has determined that it needs to be updated on the destination.
-                SCAN_RESULTS.push line
-                log line
-                scanning.stdin.write "\##{line}\n" # Put the filename into the progress bar window.
+# Do this on successful exit. FIXME just create it and let it propogate
+#timestamp('.TIMESTAMP', source, destination) # Create a timestamp on source and copy to destination.
+#exec 'killall rsync'
 
-# Handler for messages sent from rsync to stderr.
-scanner.stderr.on 'data', (buffer) ->
-    log buffer
-    e = errors("CoffeeSync: Errors from rsync during scan") unless e? # Create window if needed.
-    msg = "#{buffer}\n"
-    e.stdin.write msg
+# exec 'rm -rf /tmp/cs2/*'
 
-# When the scanner child process exits the real work begins.
-# This is where the real rsync to update the files is started.
-scanner.on 'exit', (status) ->
-    do_deletes = false
-    scanning.stdin.write "100\n" # Close the scanning progress dialog via --auto-close.
-    scanning.on 'exit', (status) -> # Zenity can be backlogged and take a while to close.
-        if DELETE and DELETE_ARRAY.length # DELETE is the command line option to enable deleting files.
-            process_deletes_and_continue(DELETE_ARRAY)
-        else
-            perform_actions(SCAN_RESULTS, false) # False means don't pass the --delete-during flag to rsync
+# source = '/usr/lib'
+# destination = '/tmp/cs2/'
+
+start_time = Date.now()
+# source, destination, dryrun, delete-flag, file_list.
+# file_list only meaningful if dryrun is false.  During the dryrun pass we don't have a list yet.
+scanner = new Syncer source, destination, true, DELETE, []
+scanner.on 'done', (file_list) ->
+    copier = new Syncer source, destination, false, DELETE, file_list
+    copier.on 'done', (file_list)->
+        notification_icon = exec "zenity --notification --window-icon=/usr/share/icons/Humanity/apps/128/gnome-info.svg"
+        notification_icon.on 'exit', -> exec "wmctrl -R CoffeeSync"
+        notify_message = "Successful sync of\n#{source}\nto\n#{destination}"
+        exec "notify-send CoffeeSync '#{notify_message}'"
+        statistics = file_list[file_list.length-13..file_list.length-1] # The statistics msg from rsync.
+        text = statistics.join '\n'
+        title = "CoffeeSync of #{source} to #{destination} is complete."
+        report = exec "zenity --info --width=575 --title='#{title}' --text='#{text}'"
+        report.on 'exit', -> process.exit(0)
+
+
